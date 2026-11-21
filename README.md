@@ -11,6 +11,8 @@ The chat stays on the left; a real shell lives in a half-width rail on the right
 
 Tip: type a trailing space (`/term `). The slash popover fuzzy-ranks, so `/term` + Enter can select `/redraw`.
 
+![Hermes TUI split-screen: chat on the left, Helix running in the embedded terminal on the right](docs/screenshot.png)
+
 ## Requirements
 
 - Hermes Agent with the Ink TUI (`hermes --tui`). Developed against v0.22.7.
