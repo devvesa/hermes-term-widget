@@ -1,5 +1,7 @@
 # hermes-term-widget
 
+> **Disclaimer:** this repo is 100% vibe coding. The code was written by an AI agent and only tested by driving a real TUI session by hand. Review it before you trust it, and expect rough edges.
+
 A split-screen terminal for the [Hermes Agent](https://hermes-agent.nousresearch.com/docs) TUI.
 The chat stays on the left; a real shell lives in a half-width rail on the right.
 
