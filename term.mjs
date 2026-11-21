@@ -6,6 +6,8 @@
  *   /termfocus   give the keyboard to the terminal
  *   ctrl+]       toggle the keyboard between the terminal and the composer
  *                (while the rail is docked)
+ *   ctrl+\       show/hide the rail: dock + focus it, or collapse it to a thin strip
+ *                (the shell keeps running). Works from the composer or the terminal.
  *
  * How it works: the SDK has no PTY or terminal emulator, so a private tmux
  * server (socket `hermes-tuiterm`, session `term`) provides both. The rail
@@ -59,6 +61,15 @@ const cardHeight = rows => Math.max(8, rows - 4)
 // ctrl+] as the focus toggle: bare 0x1d, or the kitty keyboard protocol form (CSI 93;5u).
 // eslint-disable-next-line no-control-regex
 const CTRL_RBRACKET = /^(?:\x1d|\x1b\[93;5(?::\d+)?u)$/
+
+// ctrl+\ as the show/hide toggle (0x1c, or kitty CSI 92;5u). Unbound in the Hermes TUI.
+// (ctrl+t is NOT free: it opens the agents/work monitor.)
+// eslint-disable-next-line no-control-regex
+const CTRL_BACKSLASH = /^(?:\x1c|\x1b\[92;5(?::\d+)?u)$/
+
+// The SDK can open a widget but not close it, so "hide" collapses the rail to the
+// minimum the rail container can take (its own paddingX of 1 per side).
+const COLLAPSED_WIDTH = 2
 const termCols = width => Math.max(10, width - 4)
 const termRows = rows => Math.max(4, cardHeight(rows) - 3)
 
@@ -219,7 +230,9 @@ export default function register(sdk) {
   let chain = Promise.resolve()
   let poke = () => {}
 
-  let railVisible = false // rail docked (Screen mounted)
+  let railActive = false // rail registered in the dock (visible OR collapsed)
+  let collapsed = false // rail collapsed by ctrl+\
+  let railVisible = false // rail docked and expanded (Screen mounted)
   let focused = false // focus modal mounted
   let leaveAt = 0 // last time the stdin tap saw ctrl+] while focused
 
@@ -343,31 +356,75 @@ export default function register(sdk) {
     init() {
       if (!ensureSession(termCols(railWidth()), 24)) return null
 
+      collapsed = false
+      termApp.width = railWidth()
       openWidget(focusApp, {})
 
-      return { focused: true }
+      return { collapsed: false, focused: true }
     },
 
     reduce: state => state,
 
     render({ state, t, rows }) {
+      if (state.collapsed) return h(Presence)
+
       const width = termApp.width
       const cols = termCols(width)
       const r = termRows(rows)
       const accent = state.focused ? t.color.primary : t.color.muted
 
       return h(
-        Box,
-        { borderColor: accent, borderStyle: 'round', flexDirection: 'column', flexShrink: 0, height: cardHeight(rows), width: width - 2 },
+        Presence,
+        null,
         h(
-          Text,
-          { color: accent, wrap: 'truncate' },
-          state.focused ? ' ● term · ctrl+] back to chat' : ' ○ term · ctrl+] focus · /term hide'
-        ),
-        h(Screen, { cols, focused: state.focused, rows: r })
+          Box,
+          { borderColor: accent, borderStyle: 'round', flexDirection: 'column', flexShrink: 0, height: cardHeight(rows), width: width - 2 },
+          h(
+            Text,
+            { color: accent, wrap: 'truncate' },
+            state.focused ? ' ● term · ctrl+] chat · ctrl+\\ hide' : ' ○ term · ctrl+] focus · ctrl+\\ hide'
+          ),
+          h(Screen, { cols, focused: state.focused, rows: r })
+        )
       )
     }
   })
+
+  // Mounted whenever the rail is in the dock (expanded or collapsed): tells the key tap
+  // whether ctrl+\ should show a rail or collapse one. Resets `collapsed` when the rail goes away.
+  function Presence({ children }) {
+    React.useEffect(() => {
+      railActive = true
+
+      return () => {
+        railActive = false
+        collapsed = false
+      }
+    }, [])
+
+    return children ?? null
+  }
+
+  // ctrl+\ : not docked -> dock + focus; collapsed -> expand + focus; expanded -> collapse.
+  function toggleRail() {
+    if (!railActive) {
+      if (!ensureSession(termCols(railWidth()), 24)) return
+
+      collapsed = false
+      termApp.width = railWidth()
+      openWidget(termApp, { collapsed: false, focused: true })
+      openWidget(focusApp, {})
+    } else if (collapsed) {
+      collapsed = false
+      termApp.width = railWidth()
+      updateWidget(termApp, s => ({ ...s, collapsed: false }))
+      openWidget(focusApp, {})
+    } else {
+      collapsed = true
+      termApp.width = COLLAPSED_WIDTH
+      updateWidget(termApp, s => ({ ...s, collapsed: true, focused: false }))
+    }
+  }
 
   // Tracks focus: while the modal is mounted, the rail shows the cursor.
   function Beacon() {
@@ -393,7 +450,9 @@ export default function register(sdk) {
     init() {
       if (!ensureSession(termCols(railWidth()), 24)) return null
 
-      openWidget(termApp, { focused: true })
+      collapsed = false
+      termApp.width = railWidth()
+      openWidget(termApp, { collapsed: false, focused: true })
 
       return {}
     },
@@ -430,7 +489,15 @@ export default function register(sdk) {
     try {
       const s = typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('latin1') : ''
 
-      if (s && CTRL_RBRACKET.test(s)) {
+      if (s && CTRL_BACKSLASH.test(s)) {
+        // While focused the chunk passes through so the modal closes on it (via leaveAt);
+        // otherwise swallow it like ctrl+] does.
+        if (focused) leaveAt = Date.now()
+
+        toggleRail()
+
+        if (!focused) return origRead.apply(this, args)
+      } else if (s && CTRL_RBRACKET.test(s)) {
         if (focused) {
           leaveAt = Date.now()
         } else if (railVisible) {
@@ -458,6 +525,6 @@ export default function register(sdk) {
   // Keep the rail at half the screen when the terminal is resized.
   const g = globalThis
   if (g.__hermesTermResize) process.stdout.off('resize', g.__hermesTermResize)
-  g.__hermesTermResize = () => { termApp.width = railWidth() }
+  g.__hermesTermResize = () => { termApp.width = collapsed ? COLLAPSED_WIDTH : railWidth() }
   process.stdout.on('resize', g.__hermesTermResize)
 }

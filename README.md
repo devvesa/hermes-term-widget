@@ -8,6 +8,7 @@ The chat stays on the left; a real shell lives in a half-width rail on the right
 - `/term` docks the terminal and focuses it. Run it again to hide the rail (the shell keeps running).
 - `/termfocus` gives the keyboard to the terminal.
 - `ctrl+]` toggles the keyboard between the chat composer and the terminal while the rail is docked.
+- `ctrl+\` shows or hides the rail from anywhere: it docks and focuses the terminal, or collapses it to a thin strip. The shell keeps running while hidden.
 
 Tip: type a trailing space (`/term `). The slash popover fuzzy-ranks, so `/term` + Enter can select `/redraw`.
 
@@ -45,11 +46,17 @@ Uninstall: delete the file. The `ctrl+]` hook is removed with it.
 - The rail resizes with the terminal; the inner tmux window follows.
 - The terminal cursor is painted only when the program shows the real cursor (`#{cursor_flag}` = 1). Programs such as Helix hide it and draw their own.
 
-### The ctrl+] hook
+### Why ctrl+\ and not ctrl+t
+
+`ctrl+t` is already a built-in Hermes binding (the agents / work monitor), and binding it here would shadow that. `ctrl+\` (byte `0x1c`) is unused by the Hermes TUI. Both chords are matched in their bare form and in the kitty keyboard protocol form (`ESC[92;5u` / `ESC[93;5u`). The chords are the `CTRL_BACKSLASH` and `CTRL_RBRACKET` constants at the top of `term.mjs`.
+
+The widget SDK can open a widget but not close one, so "hide" collapses the rail to a 2-column strip instead of removing it. Consequence: `/term` while the rail is collapsed removes that strip without showing anything, and a second `/term` docks the terminal again. Use `ctrl+\` to avoid the extra step.
+
+### The ctrl+] and ctrl+\ hook
 
 The widget SDK has no global hotkeys: ambient widgets receive no keys, and the input handler only talks to a widget while a modal is open. To toggle focus from the composer, the widget wraps `process.stdin.read`:
 
-- A lone `ctrl+]` chunk (bare `0x1d`, or the kitty-protocol form `ESC[93;5u`) is acted on only while the rail is docked.
+- A lone `ctrl+]` chunk (bare `0x1d`, or the kitty-protocol form `ESC[93;5u`) is acted on only while the rail is docked. A lone `ctrl+\` chunk (`0x1c`, or `ESC[92;5u`) is acted on in every state.
 - The original `read` is restored on hot reload, and any error falls back to plain pass-through.
 - To swallow the key it delegates to the real `read()` and never returns `null` itself. Returning `null` skips a call Node needs to re-arm `readable` and freezes all TUI input.
 
@@ -58,7 +65,8 @@ This is a hack on the TUI's input path; a future Hermes release could break it. 
 ## Behavior notes and limitations
 
 - While the terminal is focused, the composer is blocked. Press `ctrl+]` to get it back.
-- `ctrl+]` is reserved inside the terminal. Programs that use that chord (for example `telnet`) will not see it.
+- `ctrl+]` and `ctrl+\` are reserved inside the terminal. Programs that use them will not see them: `telnet` uses `ctrl+]`, and `ctrl+\` is the shell's SIGQUIT key.
+- `ctrl+\` can be awkward to type on some non-US keyboard layouts. Change `CTRL_BACKSLASH` if so.
 - Mouse and scrollback inside the rail are not forwarded.
 - Keystrokes can lag by up to about 200 ms (poll interval, plus a quick refresh after each key).
 - Rail height is `rows - 4` (see `cardHeight()`), leaving room for the status bar and composer. A multi-line composer could overlap a taller card.
