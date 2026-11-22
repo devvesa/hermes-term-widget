@@ -6,8 +6,8 @@
  *   /termfocus   give the keyboard to the terminal
  *   ctrl+]       toggle the keyboard between the terminal and the composer
  *                (while the rail is docked)
- *   ctrl+\ or    show/hide the rail: dock + focus it, or collapse it to a thin strip
- *   ctrl+/       (the shell keeps running). Works from the composer or the terminal.
+ *   ctrl+\       show/hide the rail: dock + focus it, or collapse it to a thin strip
+ *                (the shell keeps running). Works from the composer or the terminal.
  *
  * How it works: the SDK has no PTY or terminal emulator, so a private tmux
  * server (socket `hermes-tuiterm`, session `term`) provides both. The rail
@@ -66,13 +66,6 @@ const CTRL_RBRACKET = /^(?:\x1d|\x1b\[93;5(?::\d+)?u)$/
 // (ctrl+t is NOT free: it opens the agents/work monitor.)
 // eslint-disable-next-line no-control-regex
 const CTRL_BACKSLASH = /^(?:\x1c|\x1b\[92;5(?::\d+)?u)$/
-
-// ctrl+/ as a second show/hide chord. Terminals disagree on what it sends, so match them all:
-//   0x1f            legacy byte (also what ctrl+_ and ctrl+7 send; unused by the Hermes TUI)
-//   CSI 47;5u       kitty protocol, ctrl + '/'
-//   CSI 55;5u/55;6u kitty protocol, ctrl(+shift) + '7' (where '/' is shift+7, e.g. Spanish layouts)
-// eslint-disable-next-line no-control-regex
-const CTRL_SLASH = /^(?:\x1f|\x1b\[(?:47;5|55;[56])(?::\d+)?u)$/
 
 // The SDK can open a widget but not close it, so "hide" collapses the rail to the
 // minimum the rail container can take (its own paddingX of 1 per side).
@@ -496,7 +489,7 @@ export default function register(sdk) {
     try {
       const s = typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('latin1') : ''
 
-      if (s && (CTRL_BACKSLASH.test(s) || CTRL_SLASH.test(s))) {
+      if (s && CTRL_BACKSLASH.test(s)) {
         // While focused the chunk passes through so the modal closes on it (via leaveAt);
         // otherwise swallow it like ctrl+] does.
         if (focused) leaveAt = Date.now()
