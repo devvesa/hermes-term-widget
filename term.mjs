@@ -430,10 +430,14 @@ export default function register(sdk) {
   function Beacon() {
     React.useEffect(() => {
       focused = true
+      // Published for other widgets' key taps (e.g. gitstat's ctrl+f): while the terminal is
+      // focused, their chords must reach the shell instead.
+      globalThis.__hermesTermFocused = true
       updateWidget(termApp, s => ({ ...s, focused: true }))
 
       return () => {
         focused = false
+        globalThis.__hermesTermFocused = false
         updateWidget(termApp, s => ({ ...s, focused: false }))
       }
     }, [])
@@ -482,9 +486,12 @@ export default function register(sdk) {
   const stdin = process.stdin
   const hadOwnRead = Object.prototype.hasOwnProperty.call(stdin, 'read')
   const origRead = stdin.read
+  let live = true // false once a reload replaced this tap: it then only passes chunks through
 
   const tappedRead = function (...args) {
     const chunk = origRead.apply(this, args)
+
+    if (!live) return chunk
 
     try {
       const s = typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('latin1') : ''
@@ -517,6 +524,9 @@ export default function register(sdk) {
 
   stdin.read = tappedRead
   gs.__hermesTermStdinRestore = () => {
+    // Another widget may have tapped stdin.read on top of this one, so unwrapping is not always
+    // possible. Going inert always is: a dead tap just passes chunks through.
+    live = false
     if (stdin.read !== tappedRead) return
     if (hadOwnRead) stdin.read = origRead
     else delete stdin.read
