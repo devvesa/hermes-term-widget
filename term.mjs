@@ -9,6 +9,12 @@
  *   ctrl+\       show/hide the rail: dock + focus it, or collapse it to a thin strip
  *                (the shell keeps running). Works from the composer or the terminal.
  *
+ * Mouse (needs display.mouse_tracking on, the default):
+ *   click the rail    focus the terminal
+ *   wheel (focused)   scroll the shell's scrollback; arrows in full-screen programs;
+ *                     wheel events for programs that enable mouse reporting
+ *   click (focused)   forwarded to programs that enable SGR mouse reporting (helix, vim, tmux, ...)
+ *
  * How it works: the SDK has no PTY or terminal emulator, so a private tmux
  * server (socket `hermes-tuiterm`, session `term`) provides both. The rail
  * polls `tmux capture-pane -e` and paints the screen; the focus modal forwards
@@ -246,13 +252,83 @@ export default function register(sdk) {
   let focused = false // focus modal mounted
   let leaveAt = 0 // last time the stdin tap saw ctrl+] while focused
 
+  let scrolled = false // the shell is in tmux copy-mode because of the wheel
+
   const send = item => {
     const args =
       item.lit !== undefined
         ? ['send-keys', '-t', SESSION, '-l', '--', item.lit.replace(/;$/, '\\;')]
         : ['send-keys', '-t', SESSION, item.key]
 
+    // Typing while scrolled back must reach the shell, not copy-mode: leave copy-mode first.
+    if (scrolled) {
+      scrolled = false
+      chain = chain.then(() => tmux(['send-keys', '-t', SESSION, '-X', 'cancel']))
+    }
+
     chain = chain.then(() => tmux(args)).then(() => poke())
+  }
+
+  // Pane state needed to route mouse input: [mouse reporting on, SGR encoding, alt screen, width, height].
+  const paneMouse = async () => {
+    const out = await tmux([
+      'display-message', '-p', '-t', SESSION,
+      '#{mouse_any_flag},#{mouse_sgr_flag},#{alternate_on},#{pane_width},#{pane_height}'
+    ])
+
+    return (out || '0,0,0,1,1').trim().split(',').map(n => parseInt(n, 10) || 0)
+  }
+
+  const sgrMouse = (code, x, y, release) => `\u001b[<${code};${x};${y}${release ? 'm' : 'M'}`
+
+  // Wheel: programs with mouse reporting get wheel events; full-screen programs without it get
+  // arrow keys; a plain shell scrolls its history through tmux copy-mode.
+  const wheel = dir => {
+    chain = chain
+      .then(async () => {
+        const [any, sgr, alt, w, hgt] = await paneMouse()
+
+        if (any && sgr) {
+          const seq = sgrMouse(dir < 0 ? 64 : 65, Math.ceil(w / 2), Math.ceil(hgt / 2), false)
+
+          return tmux(['send-keys', '-t', SESSION, '-l', '--', seq])
+        }
+
+        if (alt) return tmux(['send-keys', '-t', SESSION, '-N', '3', dir < 0 ? 'Up' : 'Down'])
+
+        if (dir > 0 && !scrolled) return null
+
+        scrolled = true
+        await tmux(['copy-mode', '-e', '-t', SESSION])
+
+        return tmux(['send-keys', '-t', SESSION, '-X', '-N', '3', dir < 0 ? 'scroll-up' : 'scroll-down'])
+      })
+      .then(() => poke())
+  }
+
+  // Click on the screen: focus the terminal, or (when already focused) hand the click to a
+  // program that enabled SGR mouse reporting. Coordinates are relative to the screen box.
+  const screenClick = e => {
+    e.stopImmediatePropagation()
+
+    if (!focused) {
+      openWidget(focusApp, {})
+
+      return
+    }
+
+    const x = e.localCol + 1
+    const y = e.localRow + 1
+
+    chain = chain
+      .then(async () => {
+        const [any, sgr] = await paneMouse()
+
+        if (!any || !sgr) return null
+
+        return tmux(['send-keys', '-t', SESSION, '-l', '--', sgrMouse(0, x, y, false) + sgrMouse(0, x, y, true)])
+      })
+      .then(() => poke())
   }
 
   const spanProps = st => {
@@ -286,10 +362,23 @@ export default function register(sdk) {
         busy = true
 
         try {
+          // Scrolled back (copy-mode): capture the history window the user is looking at.
+          const range = []
+
+          if (scrolled) {
+            const [inMode, pos] = ((await tmux(['display-message', '-p', '-t', SESSION, '#{pane_in_mode},#{scroll_position}'])) || '0,0')
+              .trim()
+              .split(',')
+              .map(n => parseInt(n, 10) || 0)
+
+            if (inMode && pos > 0) range.push('-S', `-${pos}`, '-E', String(rows - 1 - pos))
+            else if (!inMode) scrolled = false
+          }
+
           const out = await tmux([
-            'capture-pane', '-p', '-e', '-t', SESSION,
+            'capture-pane', '-p', '-e', ...range, '-t', SESSION,
             ';',
-            'display-message', '-p', '-t', SESSION, '#{cursor_x},#{cursor_y},#{cursor_flag}'
+            'display-message', '-p', '-t', SESSION, '#{cursor_x},#{cursor_y},#{cursor_flag},#{pane_in_mode}'
           ])
 
           if (!alive) return
@@ -308,11 +397,11 @@ export default function register(sdk) {
 
           if (lines[lines.length - 1] === '') lines.pop()
 
-          const [cx, cy, cursorOn] = (lines.pop() || '0,0,1').split(',').map(n => parseInt(n, 10) || 0)
+          const [cx, cy, cursorOn, inMode] = (lines.pop() || '0,0,1,0').split(',').map(n => parseInt(n, 10) || 0)
 
           // cursor_flag=0: the program hid the hardware cursor and paints its own (helix, vim
           // with a custom cursor, TUIs). Drawing ours too would double-highlight that cell.
-          setSnap({ lines, cx, cy, cursorOn: cursorOn === 1 })
+          setSnap({ lines, cx, cy, cursorOn: cursorOn === 1 && inMode === 0 })
         } finally {
           busy = false
         }
@@ -352,7 +441,7 @@ export default function register(sdk) {
       )
     }
 
-    return h(Box, { flexDirection: 'column', height: rows, width: cols }, rowsOut)
+    return h(Box, { flexDirection: 'column', height: rows, onClick: screenClick, width: cols }, rowsOut)
   }
 
   const termApp = defineWidgetApp({
@@ -475,6 +564,12 @@ export default function register(sdk) {
       // The key parser only flags ctrl for bytes <= 0x1a, so bare ctrl+] (0x1d) arrives as a plain
       // char; under the kitty protocol it is ctrl + ']'. The stdin tap also stamps `leaveAt` for it.
       if (ch === '\u001d' || (key.ctrl && ch === ']') || Date.now() - leaveAt < 100) return null
+
+      if (key.wheelUp || key.wheelDown) {
+        wheel(key.wheelUp ? -1 : 1)
+
+        return state
+      }
 
       const item = toTmux(ch, key)
 

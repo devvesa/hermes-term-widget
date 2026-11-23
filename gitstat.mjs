@@ -11,10 +11,16 @@
  *   diff:  j/k or arrows   scroll        pgup / pgdn       page
  *          g / G           top / end     n / p             next / previous file
  *          esc             back to list  q                 close
+ *
+ * Mouse (needs display.mouse_tracking on, the default):
+ *   list:  click a file to open its diff    click a section header to jump to it
+ *          wheel moves the selection        click "refresh" / "close"
+ *   diff:  wheel scrolls                    click "back" / "prev" / "next" / "close"
  */
 import { execFileSync } from 'node:child_process'
 
 const MAX_DIFF_LINES = 5000
+const WHEEL_LINES = 3 // diff lines per wheel event
 
 // ctrl+f as the open/close hotkey: bare 0x06, or the kitty keyboard protocol form (CSI 102;5u).
 // Free in the Hermes TUI (ctrl+g is taken: it opens $EDITOR for the prompt).
@@ -147,7 +153,7 @@ function fileLines(s) {
     if (f.section !== section) {
       section = f.section
       const n = s.files.filter(g => g.section === section).length
-      out.push({ head: `${SECTION_LABEL[section]} (${n})` })
+      out.push({ head: `${SECTION_LABEL[section]} (${n})`, section })
     }
     out.push({ idx })
   })
@@ -184,6 +190,18 @@ function refresh(s) {
   }
 }
 
+function pick(s, idx) {
+  const next = { ...s, cursor: idx }
+  return { ...next, view: 'diff', diff: openDiff(next) }
+}
+
+function stepFile(s, dir) {
+  const idx = s.cursor + dir
+  if (idx < 0 || idx >= s.files.length) return s
+  const next = { ...s, cursor: idx }
+  return { ...next, diff: openDiff(next) }
+}
+
 function reduceList(s, ch, key) {
   // esc steps back one level; the list is the top, so only q closes here.
   if (ch === 'q') return null
@@ -191,8 +209,8 @@ function reduceList(s, ch, key) {
   const last = s.files.length - 1
   const move = to => ({ ...s, cursor: Math.max(0, Math.min(last, to)) })
 
-  if (key.downArrow || ch === 'j') return move(s.cursor + 1)
-  if (key.upArrow || ch === 'k') return move(s.cursor - 1)
+  if (key.wheelDown || key.downArrow || ch === 'j') return move(s.cursor + 1)
+  if (key.wheelUp || key.upArrow || ch === 'k') return move(s.cursor - 1)
   if (ch === 'g') return move(0)
   if (ch === 'G') return move(last)
   if (key.tab) return jumpSection(s, key.shift ? -1 : 1)
@@ -211,6 +229,8 @@ function reduceDiff(s, ch, key) {
   const max = Math.max(0, d.lines.length - page)
   const scrollTo = n => ({ ...s, diff: { ...d, scroll: Math.max(0, Math.min(max, n)) } })
 
+  if (key.wheelDown) return scrollTo(d.scroll + WHEEL_LINES)
+  if (key.wheelUp) return scrollTo(d.scroll - WHEEL_LINES)
   if (key.downArrow || ch === 'j') return scrollTo(d.scroll + 1)
   if (key.upArrow || ch === 'k') return scrollTo(d.scroll - 1)
   if (key.pageDown || ch === ' ') return scrollTo(d.scroll + page)
@@ -218,19 +238,18 @@ function reduceDiff(s, ch, key) {
   if (ch === 'g') return scrollTo(0)
   if (ch === 'G') return scrollTo(max)
 
-  if (ch === 'n' || ch === 'p') {
-    const idx = s.cursor + (ch === 'n' ? 1 : -1)
-    if (idx < 0 || idx >= s.files.length) return s
-    const next = { ...s, cursor: idx }
-    return { ...next, diff: openDiff(next) }
-  }
+  if (ch === 'n' || ch === 'p') return stepFile(s, ch === 'n' ? 1 : -1)
 
   return s
 }
 
 // ── views ────────────────────────────────────────────────────────────
 
-function ListBody({ s, t, h, Box, Text }) {
+function Btn({ label, onClick, t, h, Box, Text }) {
+  return h(Box, { flexShrink: 0, marginRight: 2, onClick }, h(Text, { color: t.color.accent }, label))
+}
+
+function ListBody({ s, t, h, Box, Text, on }) {
   const height = bodyRows()
   const lines = fileLines(s)
   const cursorLine = lines.findIndex(l => l.idx === s.cursor)
@@ -241,7 +260,9 @@ function ListBody({ s, t, h, Box, Text }) {
     const line = lines[i]
 
     if (line.head) {
-      rows.push(h(Text, { key: `h${i}`, bold: true, color: t.color.label }, line.head))
+      rows.push(
+        h(Box, { key: `h${i}`, onClick: () => on.head(line.section) }, h(Text, { bold: true, color: t.color.label }, line.head))
+      )
       continue
     }
 
@@ -252,10 +273,14 @@ function ListBody({ s, t, h, Box, Text }) {
 
     rows.push(
       h(
-        Text,
-        { key: `f${i}`, color: selected ? t.color.primary : t.color.text, bold: selected },
-        h(Text, { color: codeColor(f.code, t) }, `${marker}${f.code.padEnd(2)} `),
-        clip(f.path, pathWidth)
+        Box,
+        { key: `f${i}`, onClick: () => on.pick(line.idx) },
+        h(
+          Text,
+          { color: selected ? t.color.primary : t.color.text, bold: selected },
+          h(Text, { color: codeColor(f.code, t) }, `${marker}${f.code.padEnd(2)} `),
+          clip(f.path, pathWidth)
+        )
       )
     )
   }
@@ -281,7 +306,23 @@ function DiffBody({ d, t, h, Box, Text }) {
 // ── widget ───────────────────────────────────────────────────────────
 
 export default function register(sdk) {
-  const { Box, Dialog, Overlay, React, Text, defineWidgetApp, h, openWidget } = sdk
+  const { Box, Dialog, Overlay, React, Text, defineWidgetApp, h, openWidget, updateWidget } = sdk
+
+  let pending = null // synthetic key chunk for the stdin tap (used by the mouse "close" button)
+
+  // Mouse handlers: clicks arrive outside the reducer, so they patch the state with the same
+  // pure helpers the keyboard path uses.
+  const act = fn => updateWidget(app, s => (s.error ? s : fn(s)))
+
+  const on = {
+    pick: idx => act(s => pick(s, idx)),
+    head: section => act(s => ({ ...s, cursor: Math.max(0, s.files.findIndex(f => f.section === section)) })),
+    back: () => act(s => (s.view === 'diff' ? { ...s, view: 'list', diff: null } : s)),
+    step: dir => act(s => (s.view === 'diff' ? stepFile(s, dir) : s)),
+    refresh: () => act(refresh),
+    // The SDK cannot close a modal from code, so feed the reducer the key that closes it.
+    close: () => injectKey('q')
+  }
 
   let open = false // modal mounted; set by Beacon so it is right however the panel closed
 
@@ -334,7 +375,12 @@ export default function register(sdk) {
       if (state.error) {
         title = 'git status'
         hint = 'q to close'
-        body = h(Text, { color: t.color.error }, clip(state.error, innerWidth()))
+        body = h(
+          Box,
+          { flexDirection: 'column' },
+          h(Text, { color: t.color.error }, clip(state.error, innerWidth())),
+          h(Btn, { label: '✕ close', onClick: on.close, t, h, Box, Text })
+        )
       } else if (state.view === 'diff' && state.diff) {
         const d = state.diff
         const added = d.lines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length
@@ -344,7 +390,19 @@ export default function register(sdk) {
         body = h(
           Box,
           { flexDirection: 'column' },
-          h(Text, { color: t.color.muted }, `+${added} -${removed}${d.truncated ? `  (first ${MAX_DIFF_LINES} lines)` : ''}  line ${d.scroll + 1}/${Math.max(1, d.lines.length)}`),
+          h(
+            Box,
+            null,
+            h(Btn, { label: '‹ back', onClick: on.back, t, h, Box, Text }),
+            h(Btn, { label: '‹ prev', onClick: () => on.step(-1), t, h, Box, Text }),
+            h(Btn, { label: 'next ›', onClick: () => on.step(1), t, h, Box, Text }),
+            h(Btn, { label: '✕ close', onClick: on.close, t, h, Box, Text }),
+            h(
+              Text,
+              { color: t.color.muted, wrap: 'truncate' },
+              `+${added} -${removed}${d.truncated ? `  (first ${MAX_DIFF_LINES} lines)` : ''}  line ${d.scroll + 1}/${Math.max(1, d.lines.length)}`
+            )
+          ),
           h(DiffBody, { d, t, h, Box, Text })
         )
       } else {
@@ -353,8 +411,14 @@ export default function register(sdk) {
         body = h(
           Box,
           { flexDirection: 'column' },
-          h(Text, { color: t.color.muted }, state.files.length ? countBy(state) : 'Working tree clean.'),
-          h(ListBody, { s: state, t, h, Box, Text })
+          h(
+            Box,
+            null,
+            h(Btn, { label: '↻ refresh', onClick: on.refresh, t, h, Box, Text }),
+            h(Btn, { label: '✕ close', onClick: on.close, t, h, Box, Text }),
+            h(Text, { color: t.color.muted, wrap: 'truncate' }, state.files.length ? countBy(state) : 'Working tree clean.')
+          ),
+          h(ListBody, { s: state, t, h, Box, Text, on })
         )
       }
 
@@ -380,6 +444,13 @@ export default function register(sdk) {
   let live = true // false once a reload replaced this tap: it then only passes chunks through
 
   const tappedRead = function (...args) {
+    if (live && pending !== null) {
+      const p = pending
+      pending = null
+
+      return p
+    }
+
     const chunk = origRead.apply(this, args)
 
     if (!live || open || gs.__hermesTermFocused) return chunk
@@ -402,6 +473,17 @@ export default function register(sdk) {
     }
 
     return chunk
+  }
+
+  // Hand one key to Ink as if typed: queue it for the next read() and wake Ink's 'readable' listener.
+  function injectKey(k) {
+    pending = k
+
+    try {
+      stdin.emit('readable')
+    } catch {
+      pending = null
+    }
   }
 
   stdin.read = tappedRead

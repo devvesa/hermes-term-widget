@@ -15,6 +15,7 @@ Widgets for the [Hermes Agent](https://hermes-agent.nousresearch.com/docs) Ink T
 
 - Hermes Agent with the Ink TUI (`hermes --tui`). Developed against v0.22.7.
 - Node ESM runtime as shipped with the Hermes TUI. No build step, no dependencies.
+- Mouse support needs `display.mouse_tracking` on (the default; `hermes config set display.mouse_tracking all`).
 - `term`: `tmux` on `PATH` (developed with 3.8).
 - `gitstat`: `git` on `PATH`.
 
@@ -49,6 +50,17 @@ The chat stays on the left; a real shell lives in a half-width rail on the right
 - `ctrl+]` toggles the keyboard between the chat composer and the terminal while the rail is docked.
 - `ctrl+\` shows or hides the rail from anywhere: it docks and focuses the terminal, or collapses it to a thin strip. The shell keeps running while hidden.
 
+### Mouse
+
+| Action | Effect |
+|---|---|
+| click the rail | focus the terminal |
+| wheel, shell prompt | scroll the shell's history (typing returns to the bottom) |
+| wheel, full-screen program without mouse reporting (`less`, ...) | arrow keys, 3 per event |
+| wheel and click, program with SGR mouse reporting (Helix, Vim, tmux, ...) | forwarded to the program |
+
+The wheel and forwarded clicks need the terminal focused; with the chat focused the wheel scrolls the chat.
+
 ### How it works
 
 - A private tmux server (socket `hermes-tuiterm`, session `term`) runs your shell. It never touches your normal tmux server.
@@ -73,11 +85,23 @@ A modal panel listing the changes in the repository the TUI was launched in, gro
 
 `esc` always steps back one level and `q` always closes. In the list (the top level) `esc` does nothing.
 
+### Mouse
+
+| Where | Action | Effect |
+|---|---|---|
+| list | click a file | open its diff |
+| list | click a section header | jump to the first file of that section |
+| list | wheel | move the selection |
+| list | click `↻ refresh` / `✕ close` | refresh / close |
+| diff | wheel | scroll 3 lines per event |
+| diff | click `‹ back` / `‹ prev` / `next ›` / `✕ close` | back to the list / previous file / next file / close |
+
 ### How it works
 
 - `git status --porcelain=v1 -z --untracked-files=all` builds the file list. A file with both staged and unstaged changes appears in both sections.
 - Diffs come from `git diff --cached` (staged), `git diff` (unstaged) and `git diff --no-index /dev/null <file>` (untracked), capped at 5000 lines.
 - The widget's own `process.cwd()` is the Hermes install, not your folder, so the launch directory is read from `HERMES_CWD`.
+- `✕ close` feeds a `q` through the same `stdin.read` hook, because widgets cannot close a modal from code.
 - `ctrl+f` uses the same `stdin.read` hook as `term` (see below). The chord is the `CTRL_F` constant at the top of `gitstat.mjs`.
 
 ### Behavior notes and limitations
@@ -96,6 +120,7 @@ Driven through a real `hermes --tui` session in tmux:
 
 - **term** (200x50): dock and focus, typing including a trailing `;`, Enter, arrows, Ctrl+C, colors, `hx` (insert mode, Esc), resize, shell restart after `exit`, hide/show, and the `ctrl+]` toggle in both directions with both key encodings.
 - **gitstat** (160x45, against a scratch repo): list and diff views, `esc` back / `q` close in every view, `ctrl+f` open/close from the composer (typed text kept), list and diff, with both key encodings; with `term` focused `ctrl+f` reached the shell; both widgets still worked after repeated hot reloads of both files.
+- **Mouse** (200x50, SGR mouse bytes sent through tmux): gitstat file and header clicks, wheel in the diff, every button; term click-to-focus, shell scrollback and return to the bottom, typing while scrolled back, wheel as arrows in `less`, wheel and click forwarding to a program with mouse reporting on.
 
 ## License
 
