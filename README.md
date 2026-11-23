@@ -57,25 +57,6 @@ The chat stays on the left; a real shell lives in a half-width rail on the right
 - The rail resizes with the terminal; the inner tmux window follows.
 - The terminal cursor is painted only when the program shows the real cursor (`#{cursor_flag}` = 1). Programs such as Helix hide it and draw their own.
 
-### Why ctrl+\ and not ctrl+t
-
-`ctrl+t` is already a built-in Hermes binding (the agents / work monitor), and binding it here would shadow that. `ctrl+\` (byte `0x1c`) is unused by the Hermes TUI. Both chords are matched in their bare form and in the kitty keyboard protocol form (`ESC[92;5u` / `ESC[93;5u`). The chords are the `CTRL_BACKSLASH` and `CTRL_RBRACKET` constants at the top of `term.mjs`.
-
-The widget SDK can open a widget but not close one, so "hide" collapses the rail to a 2-column strip instead of removing it. Consequence: `/term` while the rail is collapsed removes that strip without showing anything, and a second `/term` docks the terminal again. Use `ctrl+\` to avoid the extra step.
-
-### Behavior notes and limitations
-
-- While the terminal is focused, the composer is blocked. Press `ctrl+]` to get it back.
-- `ctrl+]` and `ctrl+\` are reserved inside the terminal. Programs that use them will not see them: `telnet` uses `ctrl+]`, and `ctrl+\` is the shell's SIGQUIT key.
-- `ctrl+\` can be awkward to type on some non-US keyboard layouts. Change `CTRL_BACKSLASH` if so.
-- Mouse and scrollback inside the rail are not forwarded.
-- Keystrokes can lag by up to about 200 ms (poll interval, plus a quick refresh after each key).
-- Rail height is `rows - 4` (see `cardHeight()`), leaving room for the status bar and composer. A multi-line composer could overlap a taller card.
-- The rail is half the screen width, fixed at launch and on resize.
-- Exiting the shell starts a fresh one.
-- Known cosmetic issue: Helix inside the rail can look slightly off. Not fully diagnosed. Nerd-font glyphs may also leave the right border off by a column on some rows.
-- A live rail keeps running the code it was mounted with. After editing the file, hide and re-show it (`/term ` twice). Until then `ctrl+]` may do nothing.
-
 ---
 
 ## gitstat: git status and diff viewer
@@ -108,20 +89,6 @@ A modal panel listing the changes in the repository the TUI was launched in, gro
 - Renames show the new path only.
 
 ---
-
-## Global key hooks
-
-The widget SDK has no global hotkeys: ambient widgets receive no keys, and the input handler only talks to a widget while a modal is open. So both widgets wrap `process.stdin.read`:
-
-- Only a **lone** chord chunk is acted on; everything else passes through untouched. Any error falls back to plain pass-through, so input is never lost.
-- To swallow a key the hook delegates to the real `read()` and never returns `null` itself. Returning `null` skips a call Node needs to re-arm `readable` and freezes all TUI input.
-- Every chord is matched in its bare byte form and in the kitty keyboard protocol form (`ESC[<code>;5u`).
-- **Stacking:** each widget installs its own hook, so they chain. A hook cannot unwrap itself once another one sits on top of it, so on hot reload the old hook first turns inert (pass-through only), then unwraps if it is still on top.
-- **Sharing state:** `term` sets `globalThis.__hermesTermFocused` while the terminal has the keyboard. `gitstat` checks it so that `ctrl+f` reaches the shell instead of opening the panel.
-
-Chords used: `ctrl+]` (`0x1d`), `ctrl+\` (`0x1c`), `ctrl+f` (`0x06`). Not used because Hermes already binds them: `ctrl+t` (agents monitor) and `ctrl+g` (compose the prompt in `$EDITOR`).
-
-This is a hack on the TUI's input path; a future Hermes release could break it. Removing the files undoes it.
 
 ## Tested
 
