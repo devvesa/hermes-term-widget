@@ -13,12 +13,22 @@
  * server (socket `hermes-tuiterm`, session `term`) provides both. The rail
  * polls `tmux capture-pane -e` and paints the screen; the focus modal forwards
  * keystrokes with `tmux send-keys`. Requires `tmux` on PATH.
+ *
+ * The shell starts in the session's folder: the launch directory, or the worktree
+ * when Hermes was started with -w. Each folder has its own persistent shell.
  */
 import { execFile, execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 const SOCKET = 'hermes-tuiterm'
-const SESSION = 'term'
 const POLL_MS = 200
+
+// The session's folder: the launch directory, or the worktree when started with -w
+// (the TUI exports HERMES_CWD for both). process.cwd() is the TUI install, not the user's folder.
+const startDir = () => process.env.HERMES_CWD || process.cwd()
+
+// One shell per folder, so a -w worktree never lands in a shell left in another directory.
+const SESSION = 'term-' + createHash('sha1').update(startDir()).digest('hex').slice(0, 8)
 
 const tmuxArgs = args => ['-L', SOCKET, ...args]
 
@@ -39,7 +49,7 @@ function ensureSession(cols, rows) {
   }
 
   try {
-    run(['new-session', '-d', '-s', SESSION, '-x', String(cols), '-y', String(rows), '-c', process.cwd()])
+    run(['new-session', '-d', '-s', SESSION, '-x', String(cols), '-y', String(rows), '-c', startDir()])
     run(['set-option', '-t', SESSION, 'status', 'off'])
     run(['set-option', '-s', 'escape-time', '0'])
 
