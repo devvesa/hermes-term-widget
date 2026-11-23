@@ -21,7 +21,8 @@
  * keystrokes with `tmux send-keys`. Requires `tmux` on PATH.
  *
  * The shell starts in the session's folder: the launch directory, or the worktree
- * when Hermes was started with -w. Each folder has its own persistent shell.
+ * when Hermes was started with -w. Each TUI process gets its own shell, removed when
+ * the TUI exits.
  */
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -33,10 +34,52 @@ const POLL_MS = 200
 // (the TUI exports HERMES_CWD for both). process.cwd() is the TUI install, not the user's folder.
 const startDir = () => process.env.HERMES_CWD || process.cwd()
 
-// One shell per folder, so a -w worktree never lands in a shell left in another directory.
-const SESSION = 'term-' + createHash('sha1').update(startDir()).digest('hex').slice(0, 8)
+// One shell per TUI process and folder: parallel sessions never share a shell, and a -w
+// worktree never lands in a shell left in another directory. Name: term-<folder hash>-<pid>.
+const SESSION = 'term-' + createHash('sha1').update(startDir()).digest('hex').slice(0, 8) + '-' + process.pid
 
 const tmuxArgs = args => ['-L', SOCKET, ...args]
+
+// Remove this process's shell on exit, and sweep shells whose TUI process is gone (crash, kill -9).
+function cleanup() {
+  const g = globalThis
+
+  if (!g.__hermesTermCleanup) {
+    g.__hermesTermCleanup = true
+    process.on('exit', () => {
+      try {
+        execFileSync('tmux', tmuxArgs(['kill-session', '-t', `=${SESSION}`]), { stdio: 'ignore' })
+      } catch {
+        // already gone
+      }
+    })
+  }
+
+  try {
+    const names = execFileSync('tmux', tmuxArgs(['list-sessions', '-F', '#{session_name}']), { encoding: 'utf8' })
+      .split('\n')
+
+    for (const name of names) {
+      const m = /^term-[0-9a-f]{8}-(\d+)$/.exec(name)
+
+      if (!m || Number(m[1]) === process.pid) continue
+
+      try {
+        process.kill(Number(m[1]), 0)
+      } catch (e) {
+        if (e.code === 'ESRCH') {
+          try {
+            execFileSync('tmux', tmuxArgs(['kill-session', '-t', `=${name}`]), { stdio: 'ignore' })
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  } catch {
+    // no server yet
+  }
+}
 
 const tmux = args =>
   new Promise(resolve =>
@@ -408,6 +451,7 @@ export default function register(sdk) {
       }
 
       poke = () => setTimeout(() => void tick(), 15)
+      cleanup()
       ensureSession(cols, rows)
       void tmux(['resize-window', '-t', SESSION, '-x', String(cols), '-y', String(rows)]).then(() => tick())
       const id = setInterval(() => void tick(), POLL_MS)

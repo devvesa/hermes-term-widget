@@ -63,7 +63,7 @@ The wheel and forwarded clicks need the terminal focused; with the chat focused 
 
 ### How it works
 
-- A private tmux server (socket `hermes-tuiterm`, session `term`) runs your shell. It never touches your normal tmux server.
+- A private tmux server (socket `hermes-tuiterm`) runs your shell. It never touches your normal tmux server. Every Hermes TUI process gets its own shell (session `term-<folder hash>-<pid>`), so parallel sessions never share a terminal; it is removed when the TUI exits.
 - An **ambient** right-side rail polls `tmux capture-pane -p -e` every 200 ms, parses the SGR colors into styled `Text` spans, and paints the screen. The chat transcript reflows into the left half.
 - A **modal** focus app forwards keystrokes with `tmux send-keys`, serialized so fast typing and pastes keep their order.
 - The rail resizes with the terminal; the inner tmux window follows.
